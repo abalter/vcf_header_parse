@@ -1,0 +1,249 @@
+#!/bin/env python
+
+from io import StringIO
+import re
+import json
+
+
+base_schema = [
+      {
+        "description": "Chromosome",
+        "mode": "NULLABLE",
+        "name": "CHROM",
+        "type": "STRING"
+      },
+      {
+        "description": "Start position (0-based). Corresponds to the first base of the string of reference bases.",
+        "mode": "NULLABLE",
+        "name": "POS",
+        "type": "INTEGER"
+      },
+      {
+        "description": "dbSNP ID (rs###)",
+        "mode": "NULLABLE",
+        "name": "ID",
+        "type": "STRING"
+      },
+      {
+        "description": "Reference bases.",
+        "mode": "NULLABLE",
+        "name": "REF",
+        "type": "STRING"
+      },
+      {
+        "description": "Alternate bases.",
+        "mode": "NULLABLE",
+        "name": "ALT",
+        "type": "STRING"
+      },
+      {
+        "description": "Phred-scaled quality score (-10log10 prob(call is wrong)). Higher values imply better quality.",
+        "mode": "NULLABLE",
+        "name": "QUAL",
+        "type": "STRING"
+      },
+      {
+        "description": "List of failed filters (if any) or \"PASS\" indicating the variant has passed all filters.",
+        "mode": "NULLABLE",
+        "name": "FILTER",
+        "type": "STRING"
+      }
+]
+
+
+def main(
+      in_vcf, 
+      out_schema, 
+      metadata_sections, 
+      schema_type,
+      include_base
+    ):
+        
+    """
+    Writes a dictionary containing the metadata sections with
+    specified sections and schema type as a JSON string to 
+    stdout or a file.
+    """
+    
+    ### Convert raw
+    schema_dict = parseVcfHeader(in_vcf, metadata_sections)
+    
+    ### I just like the way this logic reads over the negations
+    if schema_type is None or schema_type == "raw":
+        pass
+    else:
+        schema_dict = converVcfJsonToBqSchema(schema_dict)
+        
+    if include_base:
+        schema_dict["base"] = base_schema
+      
+    out_schema.write(json.dumps(schema_dict, indent=4, default=str))
+    
+    out_schema.close()
+
+
+
+def parseVcfHeader(input_vcf, metadata_sections):
+    """
+    Parses VCF metadata into a dictionary.
+    """
+
+    ### Matches header line. From "##TAG=<KEY1=VAL1,KEY2=VAL2....>"" 
+    ### capture the TAG and the KEY=VAL paris
+    section_pattern = re.compile(r'''^##(?P<section>[^=]+)=(?P<kv_data>.*)''')
+
+    ### Parse the KEY/VAL pairs. the VAL can have commas and equal signs
+    ### but not quotes unless they are escaped.
+    kv_pattern = re.compile(r'''(?P<key>\w+)=(?P<val>(?:[^\",<>]+)|(?:\"[^\"<>]+\"))''')
+
+    schema_dict = {}
+
+    for line in [line for line in input_vcf if bool(section_pattern.match(line))]:
+        
+        ### capture section and kv string
+        (section, kv_data) = section_pattern.match(line).groups()
+        
+        if section in metadata_sections or metadata_sections == "all":
+        
+            ### Parse the kv string
+            kvs_parsed = kv_pattern.finditer(kv_data)
+    
+            ### Get dict of keys and values (groupdict). Looks like
+            ### [{key: key1, val: val1}, {key: key2, val: val2}]
+            kv_groupdict = [x.groupdict() for x in kvs_parsed]
+    
+            ### Build actual kv dictionary
+            kv_dict = {el['key']:el['val'] for el in kv_groupdict}
+            
+            if kv_dict == {}:
+                kv_dict = kv_data
+    
+            ### If schema doesn't have section yet, start with empty list
+            schema_dict.setdefault(section, [])
+    
+            schema_dict[section].append(kv_dict)
+
+    return schema_dict
+      
+
+def converVcfJsonToBqSchema(schema_dict):
+    
+    #metadata_sections = ["FORMAT", "INFO", "FILTER"]
+    
+    ### Dictionary with specific sections
+    bq_schema = {x:schema_dict[x] for x in schema_dict.keys()}
+
+    ### Dictionary to change pandas DF column names to those
+    ### for BigQuery schema
+    old_keys = {"ID":"name", "Type":"type", "Description":"description"}
+    new_keys = {"name":"ID", "type":"Type", "description":"Description"}
+    
+    
+    def getBqVal(section, element, key):
+        
+        # print("**** in getBqVal ******")
+        # print("section:", section, "key:", key, "element:", element)
+        # print("element.keys():", element.keys)
+          
+        value = element[key]
+        
+        if key == "ID":
+            value = section.lower() + "_" + value
+        
+        if key == "Type":
+            value = value.upper()
+            
+        return value
+      
+        
+    for section in schema_dict.keys():
+      
+        if type(bq_schema[section][0])==dict:
+            bq_schema[section] = [
+                {
+                    new_key: getBqVal(section,element,old_key)
+                    for old_key, new_key in old_keys.items() 
+                    if old_key in element.keys()
+                } 
+                for element in bq_schema[section]
+            ]
+            
+    return bq_schema
+        
+
+if __name__ == "__main__":
+
+    import argparse
+    import sys
+    
+    parser = argparse.ArgumentParser(description=\
+"""
+Parses the VCF header which contains metadata and schema for
+the various sections and elements and converts it to a JSON string.
+Output options include which metadata sections to include and whether
+to putput metadata exactly as specified in the header or convert it
+to the JSON schema format BigQuery requires.\
+"""
+    )
+
+    parser.add_argument('--in_vcf', '-i',
+        nargs='?',
+        type=argparse.FileType('r'),
+        default=sys.stdin,
+        help="Input VCF file. Defaults to stdin."
+    )
+
+    parser.add_argument('--out_schema', '-o',
+        nargs='?',
+        type=argparse.FileType('w'),
+        default=sys.stdout,
+        help="Schema output file. Defaults to stdout."
+    )
+    
+    parser.add_argument('--schema_type', '-t',
+        # nargs='1',
+        type=str,
+        default="raw",
+        choices=['raw', 'bq'],
+        help="Raw schema or formatted for BigQuery."
+    )
+    
+    parser.add_argument('--metadata_sections', '-m',
+        nargs='*',
+        type=str,
+        default="all",
+        help="Header metadata sections to include."
+    )
+    
+    parser.add_argument('--include_base', '-b',
+      # nargs=0,
+      # type=bool,
+      default=True,
+      action='store_true',
+      help="""Include a "base" section for the standard columns:
+    CHROM POS ID REF ALT QUAL.""")
+
+    args = parser.parse_args()
+
+    in_vcf = args.in_vcf
+    out_schema = args.out_schema
+    metadata_sections = args.metadata_sections
+    schema_type = args.schema_type
+    include_base = args.include_base
+    # 
+    # print(
+    #   "metadata_sections:", metadata_sections,
+    #   "schema type:", schema_type,
+    #   "include base:", include_base
+    # )
+    # 
+    
+    main(
+      in_vcf=in_vcf,
+      out_schema=out_schema,
+      metadata_sections = metadata_sections,
+      schema_type = schema_type,
+      include_base = include_base
+    )
+
+    
