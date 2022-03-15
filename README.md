@@ -24,7 +24,7 @@ output using the `--include_base` or `-b` flag.
     --in_vcf small.vcf \
     --out_schema small.json \
     --schema_type bq \
-    --metadata_sections FORMAT FILTER \
+    --metadata_sections INFO FORMAT *FILTER \
     --include_base
 ```
 
@@ -57,7 +57,7 @@ See [here](https://cloud.google.com/bigquery/docs/schemas) for a detailed descri
 
 To Do:
 - [ ] Facilitate other cloud formats (e.g. Azure, AWS) and SQL engines.
-- [ ] Options for "flattening" the schema because the schema to upload to
+- [x] Options for "flattening" the schema because the schema to upload to
       BigQuery needs to be a simple list of key-value pairs. (see above.
 - [ ] R utility to convert the schema to `bq_field` format in the [`bigrquery`
       library](https://bigrquery.r-dbi.org/)
