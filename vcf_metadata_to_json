@@ -197,6 +197,8 @@ def convertSchemaDictToBq(schema_dict):
     
     Important to note that this schema is "flat" in the sense that it is
     a 1-D list of each column of the table that will be uploaded.
+    
+    Also, the "FLAG" type in the VCF spec will be changed to INTEGER.
     """
   
     # print("***** in converSchemaDict... *********")
@@ -209,6 +211,8 @@ def convertSchemaDictToBq(schema_dict):
     ### for BigQuery schema
     old_keys = {"ID":"name", "Type":"type", "Description":"description"}
     new_keys = {"name":"ID", "type":"Type", "description":"Description"}
+    
+    old_types = {"FLAG":"INTEGER"}
       
       
     def getBqElement(section, element):
@@ -222,14 +226,16 @@ def convertSchemaDictToBq(schema_dict):
             # print("key:", key, "value: ", value)
             
             if key == "ID":
-                value = section.lower() + "_" + value
-            
+                value = section.lower() + "_" + value.replace(".", "_")
+
             if key == "Type":
                 value = value.upper()
+                if value == "FLAG":
+                    value = "INTEGER"
                 
             if key in old_keys.keys():
                 key = old_keys[key]
-            
+                
             # print("key:", key, "value:", value)
             new_element[key] = value
             
