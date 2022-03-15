@@ -30,6 +30,13 @@ output using the `--include_base` or `-b` flag.
 
 Can output to stdout and take input from stdin.
 
+Assuming `vcf_metadata_to_json` is in your path:
+
+```
+cat tiny.vcf | vcf_metadata_to_json
+```
+
+
 # BigQuery Schema
 The correct format for BigQuery schema is a flat list of JSON object literals
 in the following format:

@@ -51,12 +51,22 @@ base_schema = [
 ]
 
 
+### Matches header line. From "##TAG=<KEY1=VAL1,KEY2=VAL2....>"" 
+### capture the TAG and the KEY=VAL paris
+section_pattern = re.compile(r'''^##(?P<section>[^=]+)=(?P<kv_data>.*)''')
+
+### Parse the KEY/VAL pairs. the VAL can have commas and equal signs
+### but not quotes unless they are escaped.
+kv_pattern = re.compile(r'''(?P<key>\w+)=(?P<val>(?:[^\",<>]+)|(?:\"[^\"<>]+\"))''')
+
+
 def main(
       in_vcf, 
       out_schema, 
       metadata_sections, 
       schema_type,
-      include_base
+      explicit,
+      list_sections
     ):
         
     """
@@ -65,109 +75,177 @@ def main(
     stdout or a file.
     """
     
+    if list_sections:
+        schema_list = getVcfHeaderSections(in_vcf)
+        schema_list = "\n".join(schema_list)
+        out_schema.write(schema_list)
+        out_schema.close()
+        return
+    
+    ### Unpack metadata sections
+    include = [x.upper() for x in metadata_sections if not x.startswith("*")]
+    exclude = [x.lstrip("*").upper() for x in metadata_sections if x.startswith("*")]
+    
+    if include == [] and exclude == []:
+        include = 'all'
+    
+    ### Include overrides exclude
+    exclude = list( set(exclude) - set(include) )
+        
+    metadata_sections = {
+        'include': include,
+        'exclude': exclude
+    }
+    
+    # print("metadata sections:", metadata_sections)
+    
     ### Convert raw
     schema_dict = parseVcfHeader(in_vcf, metadata_sections)
+
+    # print("*********** Schema Dict ****************")
+    # print(schema_dict)
     
-    ### I just like the way this logic reads over the negations
+    # print("include_base:", include_base)
+    
+    ### I just like the way this logic reads over negations
     if schema_type is None or schema_type == "raw":
         pass
     else:
-        schema_dict = converVcfJsonToBqSchema(schema_dict)
-        
-    if include_base:
-        schema_dict["base"] = base_schema
-      
+        schema_dict = convertSchemaDictToBq(schema_dict)
+
+    ### Write schema
     out_schema.write(json.dumps(schema_dict, indent=4, default=str))
-    
     out_schema.close()
 
 
-
-def parseVcfHeader(input_vcf, metadata_sections):
+def parseVcfHeader(in_vcf, metadata_sections):
     """
     Parses VCF metadata into a dictionary.
     """
 
-    ### Matches header line. From "##TAG=<KEY1=VAL1,KEY2=VAL2....>"" 
-    ### capture the TAG and the KEY=VAL paris
-    section_pattern = re.compile(r'''^##(?P<section>[^=]+)=(?P<kv_data>.*)''')
-
-    ### Parse the KEY/VAL pairs. the VAL can have commas and equal signs
-    ### but not quotes unless they are escaped.
-    kv_pattern = re.compile(r'''(?P<key>\w+)=(?P<val>(?:[^\",<>]+)|(?:\"[^\"<>]+\"))''')
-
     schema_dict = {}
 
-    for line in [line for line in input_vcf if bool(section_pattern.match(line))]:
+    for line in [line for line in in_vcf if bool(section_pattern.match(line))]:
         
         ### capture section and kv string
         (section, kv_data) = section_pattern.match(line).groups()
         
-        if section in metadata_sections or metadata_sections == "all":
-        
-            ### Parse the kv string
-            kvs_parsed = kv_pattern.finditer(kv_data)
-    
-            ### Get dict of keys and values (groupdict). Looks like
-            ### [{key: key1, val: val1}, {key: key2, val: val2}]
-            kv_groupdict = [x.groupdict() for x in kvs_parsed]
-    
-            ### Build actual kv dictionary
-            kv_dict = {el['key']:el['val'] for el in kv_groupdict}
-            
-            if kv_dict == {}:
-                kv_dict = kv_data
-    
-            ### If schema doesn't have section yet, start with empty list
-            schema_dict.setdefault(section, [])
-    
-            schema_dict[section].append(kv_dict)
+        # print("section:", section)
 
+        if section in metadata_sections['exclude']:
+            # print("section:", section, "excluded")
+            continue
+        elif section not in metadata_sections['include'] and explicit:
+            # print("explicit:", explicit, "include:", metadata_sections['include'], "excluding")
+            continue
+        elif section in metadata_sections['include']:
+            # print("explicit:", explicit, "include:", metadata_sections['include'], "includign")
+            pass
+        elif metadata_sections['include'] == "all":
+            # print("metadata all")
+            pass
+          
+        # print("parsing section:", section)
+    
+        ### Parse the kv string
+        kvs_parsed = kv_pattern.finditer(kv_data)
+
+        ### Get dict of keys and values (groupdict). Looks like
+        ### [{key: key1, val: val1}, {key: key2, val: val2}]
+        kv_groupdict = [x.groupdict() for x in kvs_parsed]
+
+        ### Build actual kv dictionary
+        kv_dict = {el['key']:el['val'] for el in kv_groupdict}
+        
+        if kv_dict == {}:
+            kv_dict = kv_data
+
+
+        # print("kv_dict", kv_dict)
+        
+        ### If schema doesn't have section yet, start with empty list
+        schema_dict.setdefault(section, [])
+
+        schema_dict[section].append(kv_dict)
+      
+    
+    if "BASE" not in metadata_sections['exclude']:
+        schema_dict["base"] = base_schema
+        
     return schema_dict
       
 
-def converVcfJsonToBqSchema(schema_dict):
+def getVcfHeaderSections(in_vcf):
+    section_list = []
+
+    for line in [line for line in in_vcf if bool(section_pattern.match(line))]:
+        
+        ### capture section and kv string
+        (section, kv_data) = section_pattern.match(line).groups()
+        
+        section_list.append(section)
+        
+    section_list = list(set(section_list))
     
-    #metadata_sections = ["FORMAT", "INFO", "FILTER"]
+    return section_list
+    
+
+def convertSchemaDictToBq(schema_dict):
+    """
+    Convert the raw schema dictionary, which is exactly as in the VCF
+    header, to a JSON schema compatible with uploading data to BigQuery.
+    
+    Important to note that this schema is "flat" in the sense that it is
+    a 1-D list of each column of the table that will be uploaded.
+    """
+  
+    # print("***** in converSchemaDict... *********")
     
     ### Dictionary with specific sections
-    bq_schema = {x:schema_dict[x] for x in schema_dict.keys()}
+    #bq_schema = {x:schema_dict[x] for x in schema_dict.keys()}
+    bq_schema = []
 
     ### Dictionary to change pandas DF column names to those
     ### for BigQuery schema
     old_keys = {"ID":"name", "Type":"type", "Description":"description"}
     new_keys = {"name":"ID", "type":"Type", "description":"Description"}
-    
-    
-    def getBqVal(section, element, key):
+      
+      
+    def getBqElement(section, element):
         
-        # print("**** in getBqVal ******")
-        # print("section:", section, "key:", key, "element:", element)
+        # print("**** in getBqElement ******")
+        # print("section:", section, "element:", element)
         # print("element.keys():", element.keys)
-          
-        value = element[key]
         
-        if key == "ID":
-            value = section.lower() + "_" + value
-        
-        if key == "Type":
-            value = value.upper()
+        new_element = {}
+        for key,value in element.items():
+            # print("key:", key, "value: ", value)
             
-        return value
+            if key == "ID":
+                value = section.lower() + "_" + value
+            
+            if key == "Type":
+                value = value.upper()
+                
+            if key in old_keys.keys():
+                key = old_keys[key]
+            
+            # print("key:", key, "value:", value)
+            new_element[key] = value
+            
+        # print("new_element:", new_element)
+            
+        return new_element
       
-        
+    
     for section in schema_dict.keys():
-      
-        if type(bq_schema[section][0])==dict:
-            bq_schema[section] = [
-                {
-                    new_key: getBqVal(section,element,old_key)
-                    for old_key, new_key in old_keys.items() 
-                    if old_key in element.keys()
-                } 
-                for element in bq_schema[section]
-            ]
-            
+
+        
+        if type(schema_dict[section][0])==dict:
+            for element in schema_dict[section]:
+                new_element = getBqElement(section, element)
+                bq_schema.append(new_element)
+                
     return bq_schema
         
 
@@ -208,42 +286,53 @@ to the JSON schema format BigQuery requires.\
         help="Raw schema or formatted for BigQuery."
     )
     
-    parser.add_argument('--metadata_sections', '-m',
-        nargs='*',
-        type=str,
-        default="all",
-        help="Header metadata sections to include."
+    parser.add_argument('--list_sections', '-l',
+        # nargs='1',
+        default=False,
+        action='store_true',
+        help="List header sections. If output file is specified, will be written there."
     )
     
-    parser.add_argument('--include_base', '-b',
-      # nargs=0,
-      # type=bool,
-      default=True,
-      action='store_true',
-      help="""Include a "base" section for the standard columns:
-    CHROM POS ID REF ALT QUAL.""")
-
+    parser.add_argument('--metadata_sections', '-s',
+        nargs='*',
+        type=str,
+        default=[],
+        help="Space delimited list of header metadata sections to include. "
+        + "Exclude sections by prepending \"*\", for example *INFO. The base "
+        + "fields CHROM POS ID REF ALT QUAL will included by default. Esclude "
+        + "them with *base"
+    )
+    
+    parser.add_argument('--explicit', '-e',
+        # nargs='1',
+        default=False,
+        action='store_true',
+        help="Treat list if header sections as \"explicit\" meaning that ONLY \
+        the ones specified will be included. The reason is that it's not obvious \
+        which sections a header has until you list them."
+    )
     args = parser.parse_args()
 
     in_vcf = args.in_vcf
     out_schema = args.out_schema
     metadata_sections = args.metadata_sections
     schema_type = args.schema_type
-    include_base = args.include_base
-    # 
+    explicit = args.explicit
+    list_sections = args.list_sections
+
     # print(
     #   "metadata_sections:", metadata_sections,
-    #   "schema type:", schema_type,
-    #   "include base:", include_base
+    #   "explicit:", explicit,
+    #   "schema type:", schema_type
     # )
-    # 
-    
+
     main(
       in_vcf=in_vcf,
       out_schema=out_schema,
       metadata_sections = metadata_sections,
       schema_type = schema_type,
-      include_base = include_base
+      explicit = explicit,
+      list_sections = list_sections
     )
 
     
