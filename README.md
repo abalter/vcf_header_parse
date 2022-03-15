@@ -55,7 +55,7 @@ See [here](https://cloud.google.com/bigquery/docs/schemas) for a detailed descri
 [mode](https://cloud.google.com/bigquery/docs/schemas#modes)
 
 
-To Do:
+# To Do:
 - [ ] Facilitate other cloud formats (e.g. Azure, AWS) and SQL engines.
 - [x] Options for "flattening" the schema because the schema to upload to
       BigQuery needs to be a simple list of key-value pairs. (see above.
