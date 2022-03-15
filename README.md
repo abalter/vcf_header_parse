@@ -10,6 +10,26 @@ However, as an intermediate step I decided it could be useful to also be able
 to output a "raw" version in which the entire header is parsed to JSON
 with no reformatting or assumptions for BigQuery. (See "to do")
 
+# Base VCF Fields
+Schema for the base VCF fields, _CHROM_, _POS_, _ID_, _REF_, _ALT_, and _QUAL_
+are not specified in the VCF header. Therefore, they are not parsed by this
+tool. I wrote a basic schema for these fields that can be included in the JSON
+output using the `--include_base` or `-b` flag.
+
+
+# Usage:
+
+```
+./vcf_metadata_to_json \
+    --in_vcf small.vcf \
+    --out_schema small.json \
+    --schema_type bq \
+    --metadata_sections FORMAT FILTER \
+    --include_base
+```
+
+Can output to stdout and take input from stdin.
+
 # BigQuery Schema
 The correct format for BigQuery schema is a flat list of JSON object literals
 in the following format:
@@ -33,7 +53,7 @@ To Do:
 - [ ] Options for "flattening" the schema because the schema to upload to
       BigQuery needs to be a simple list of key-value pairs. (see above.
 - [ ] R utility to convert the schema to `bq_field` format in the [`bigrquery`
-      library]()
+      library](https://bigrquery.r-dbi.org/)
 - [ ] Option for exporting schema when uploading INFO, FORMAT, and FILTER
       sections as JSON object literals rather than an expanded set of
       columns 
