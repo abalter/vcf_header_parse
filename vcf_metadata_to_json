@@ -63,7 +63,8 @@ kv_pattern = re.compile(r'''(?P<key>\w+)=(?P<val>(?:[^\",<>]+)|(?:\"[^\"<>]+\"))
 def main(
       in_vcf, 
       out_schema, 
-      metadata_sections, 
+      metadata_sections,
+      nested_sections,
       schema_type,
       explicit,
       list_sections
@@ -106,12 +107,14 @@ def main(
     # print(schema_dict)
     
     # print("include_base:", include_base)
-    
+  
     ### I just like the way this logic reads over negations
     if schema_type is None or schema_type == "raw":
         pass
-    else:
-        schema_dict = convertSchemaDictToBq(schema_dict)
+    elif schema_type == "bq-nested":
+        schema_dict = convertSchemaDictToBqNested(schema_dict, nested_sections)
+    elif schema_type == "bq-wide":
+        schema_dict = convertSchemaDictToBqWide(schema_dict)
 
     ### Write schema
     out_schema.write(json.dumps(schema_dict, indent=4, default=str))
@@ -122,8 +125,10 @@ def parseVcfHeader(in_vcf, metadata_sections):
     """
     Parses VCF metadata into a dictionary.
     """
-
+    
     schema_dict = {}
+    if "BASE" not in metadata_sections['exclude']:
+        schema_dict["base"] = base_schema
 
     for line in [line for line in in_vcf if bool(section_pattern.match(line))]:
         
@@ -167,10 +172,6 @@ def parseVcfHeader(in_vcf, metadata_sections):
         schema_dict.setdefault(section, [])
 
         schema_dict[section].append(kv_dict)
-      
-    
-    if "BASE" not in metadata_sections['exclude']:
-        schema_dict["base"] = base_schema
         
     return schema_dict
       
@@ -190,7 +191,7 @@ def getVcfHeaderSections(in_vcf):
     return section_list
     
 
-def convertSchemaDictToBq(schema_dict):
+def convertSchemaDictToBqWide(schema_dict):
     """
     Convert the raw schema dictionary, which is exactly as in the VCF
     header, to a JSON schema compatible with uploading data to BigQuery.
@@ -245,12 +246,105 @@ def convertSchemaDictToBq(schema_dict):
       
     
     for section in schema_dict.keys():
-
         
         if type(schema_dict[section][0])==dict:
             for element in schema_dict[section]:
                 new_element = getBqElement(section, element)
                 bq_schema.append(new_element)
+                
+    return bq_schema
+        
+        
+def convertSchemaDictToBqNested(schema_dict, nested_sections):
+    """
+    Convert the raw schema dictionary, which is exactly as in the VCF
+    header, to a JSON schema compatible with uploading data to BigQuery.
+    
+    Important to note that this schema is "flat" in the sense that it is
+    a 1-D list of each column of the table that will be uploaded.
+    
+    Also, the "FLAG" type in the VCF spec will be changed to INTEGER.
+    """
+  
+    # print("***** in converSchemaDict... *********")
+    
+    ### Dictionary with specific sections
+    #bq_schema = {x:schema_dict[x] for x in schema_dict.keys()}
+    
+    if "base" in schema_dict.keys():
+      bq_schema = schema_dict.pop("base")
+    else:
+      bq_schema = []
+
+    ### Dictionary to change pandas DF column names to those
+    ### for BigQuery schema
+    old_keys = {"ID":"name", "Type":"type", "Description":"description"}
+    new_keys = {"name":"ID", "type":"Type", "description":"Description"}
+    
+    old_types = {"FLAG":"INTEGER"}
+      
+      
+    def getBqElement(section, element):
+        
+        # print("**** in getBqElement ******")
+        # print("section:", section, "element:", element)
+        # print("element.keys():", element.keys)
+        
+        new_element = {}
+        for key,value in element.items():
+            # print("key:", key, "value: ", value)
+
+            if key == "Type":
+                value = value.upper()
+                if value == "FLAG":
+                    value = "INTEGER"
+                
+            if key in old_keys.keys():
+                key = old_keys[key]
+                
+            # print("key:", key, "value:", value)
+            new_element[key] = value
+            
+        # print("new_element:", new_element)
+            
+        return new_element
+      
+    for section in schema_dict.keys():
+      
+        tmp_element = {}
+        
+        # print("section:", section)
+        # print("nested sections", nested_sections)
+
+        fields_list = []
+        
+        if type(schema_dict[section][0])==dict:
+            for element in schema_dict[section]:
+                # print("element:", element)
+                new_element = getBqElement(section, element)
+                # print("new element:", new_element)
+                  
+                if section in nested_sections:
+                    fields_list.append(new_element)
+                else:
+                    bq_schema.append(new_element)
+                    
+                   
+            if section in nested_sections:
+                section_name = section
+                section_type = "RECORD"
+                section_mode = "REPEATED"
+                section_description = "TBD"
+                section_element = dict(
+                    name = section_name,
+                    type = section_type,
+                    mode = section_mode,
+                    description = section_description,
+                    fields = fields_list
+                )
+                
+                # print("section element:", section_element)
+                bq_schema.append(section_element)
                 
     return bq_schema
         
@@ -288,7 +382,7 @@ to the JSON schema format BigQuery requires.\
         # nargs='1',
         type=str,
         default="raw",
-        choices=['raw', 'bq'],
+        choices=['raw', 'bq-wide', 'bq-nested'],
         help="Raw schema or formatted for BigQuery."
     )
     
@@ -300,6 +394,16 @@ to the JSON schema format BigQuery requires.\
     )
     
     parser.add_argument('--metadata_sections', '-s',
+        nargs='*',
+        type=str,
+        default=[],
+        help="Space delimited list of header metadata sections to include. "
+        + "Exclude sections by prepending \"*\", for example *INFO. The base "
+        + "fields CHROM POS ID REF ALT QUAL will included by default. Esclude "
+        + "them with *base"
+    )
+    
+    parser.add_argument('--nested_sections', '-n',
         nargs='*',
         type=str,
         default=[],
@@ -322,6 +426,7 @@ to the JSON schema format BigQuery requires.\
     in_vcf = args.in_vcf
     out_schema = args.out_schema
     metadata_sections = args.metadata_sections
+    nested_sections = args.nested_sections
     schema_type = args.schema_type
     explicit = args.explicit
     list_sections = args.list_sections
@@ -336,6 +441,7 @@ to the JSON schema format BigQuery requires.\
       in_vcf=in_vcf,
       out_schema=out_schema,
       metadata_sections = metadata_sections,
+      nested_sections = nested_sections,
       schema_type = schema_type,
       explicit = explicit,
       list_sections = list_sections
